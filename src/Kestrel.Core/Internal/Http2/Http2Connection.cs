@@ -195,7 +195,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                     await _frameWriter.WriteSettingsAsync(_serverSettings);
                 }
 
-                while (_connectionState == ConnectionState.Open || (_connectionState == ConnectionState.Closing && !_streams.IsEmpty))
+                while (_connectionState != ConnectionState.Closed)
                 {
                     var result = await Input.ReadAsync();
                     var readableBuffer = result.Buffer;
@@ -803,9 +803,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                             StartStream(application);
                             _highestOpenedStreamId = _currentHeadersStream.StreamId;
                         }
-
-                        ResetRequestHeaderParsingState();
                     }
+
+                    ResetRequestHeaderParsingState();
                 }
             }
             catch (Http2StreamErrorException)
