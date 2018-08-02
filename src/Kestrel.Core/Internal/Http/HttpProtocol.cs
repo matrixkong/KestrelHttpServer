@@ -1034,6 +1034,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http
                 {
                     // We can no longer change the response, so we simply close the connection.
                     _keepAlive = false;
+                    ApplicationAbort();
                     return Task.CompletedTask;
                 }
 

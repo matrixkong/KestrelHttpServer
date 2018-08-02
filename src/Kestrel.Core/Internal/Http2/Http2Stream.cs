@@ -365,7 +365,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         protected override void ApplicationAbort()
         {
             var abortReason = new ConnectionAbortedException(CoreStrings.ConnectionAbortedByApplication);
-            ResetAndAbort(abortReason, Http2ErrorCode.CANCEL);
+            ResetAndAbort(abortReason, Http2ErrorCode.INTERNAL_ERROR);
         }
 
         private void ResetAndAbort(ConnectionAbortedException abortReason, Http2ErrorCode error)
