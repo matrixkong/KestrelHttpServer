@@ -4,6 +4,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Security.Authentication;
 using System.Text;
@@ -45,7 +46,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         internal enum ConnectionState
         {
-            Open,
+            Open = 0,
             Closing,
             Closed
         }
@@ -79,9 +80,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         private RequestHeaderParsingState _requestHeaderParsingState;
         private PseudoHeaderFields _parsedPseudoHeaderFields;
         private bool _isMethodConnect;
-        private int _highestOpenedStreamId;
-        private ConnectionState _connectionState = ConnectionState.Open;
-        private object _connectionStateLock = new object();
+        //private int HighestOpenedStreamId;
+        //private ConnectionState State = ConnectionState.Open;
+        private object StateLock = new object();
 
         private readonly ConcurrentDictionary<int, Http2Stream> _streams = new ConcurrentDictionary<int, Http2Stream>();
 
@@ -93,22 +94,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         }
 
         // internal for testing
-        internal ConnectionState State
-        {
-            get
-            {
-                return _connectionState;
-            }
-        }
+        internal Dictionary<ConnectionState, ManualResetEventSlim> StateTransitionEvents { get; set; }
 
         // internal for testing
-        internal int HighestOpenedStreamId
-        {
-            get
-            {
-                return _highestOpenedStreamId;
-            }
-        }
+        internal ConnectionState State { get; private set; } = ConnectionState.Open;
+
+        // internal for testing
+        internal int HighestOpenedStreamId { get; private set; }
 
         public string ConnectionId => _context.ConnectionId;
 
@@ -120,12 +112,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         public void OnInputOrOutputCompleted()
         {
-            lock (_connectionStateLock)
+            lock (StateLock)
             {
-                if (_connectionState != ConnectionState.Closed)
+                if (State != ConnectionState.Closed)
                 {
-                    _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR);
-                    _connectionState = ConnectionState.Closed;
+                    _frameWriter.WriteGoAwayAsync(HighestOpenedStreamId, Http2ErrorCode.NO_ERROR);
+                    UpdateState(ConnectionState.Closed);
                 }
             }
 
@@ -134,12 +126,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         public void Abort(ConnectionAbortedException ex)
         {
-            lock (_connectionStateLock)
+            lock (StateLock)
             {
-                if (_connectionState != ConnectionState.Closed)
+                if (State != ConnectionState.Closed)
                 {
-                    _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.INTERNAL_ERROR);
-                    _connectionState = ConnectionState.Closed;
+                    _frameWriter.WriteGoAwayAsync(HighestOpenedStreamId, Http2ErrorCode.INTERNAL_ERROR);
+                    UpdateState(ConnectionState.Closed);
                 }
             }
 
@@ -151,14 +143,14 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         public void StopProcessingNextRequest(bool sendGoAway = false)
         {
-            lock (_connectionStateLock)
+            lock (StateLock)
             {
-                if (_connectionState == ConnectionState.Open)
+                if (State == ConnectionState.Open)
                 {
                     if (_streams.IsEmpty)
                     {
-                        _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR);
-                        _connectionState = ConnectionState.Closed;
+                        _frameWriter.WriteGoAwayAsync(HighestOpenedStreamId, Http2ErrorCode.NO_ERROR);
+                        UpdateState(ConnectionState.Closed);
                     }
                     else
                     {
@@ -167,7 +159,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                             _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR);
                         }
 
-                        _connectionState = ConnectionState.Closing;
+                        UpdateState(ConnectionState.Closing);
                     }
                 }
             }
@@ -190,12 +182,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                     return;
                 }
 
-                if (_connectionState != ConnectionState.Closed)
+                if (State != ConnectionState.Closed)
                 {
                     await _frameWriter.WriteSettingsAsync(_serverSettings);
                 }
 
-                while (_connectionState != ConnectionState.Closed)
+                while (State != ConnectionState.Closed)
                 {
                     var result = await Input.ReadAsync();
                     var readableBuffer = result.Buffer;
@@ -260,12 +252,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             }
             finally
             {
-                lock (_connectionStateLock)
+                lock (StateLock)
                 {
-                    if (_connectionState != ConnectionState.Closed)
+                    if (State != ConnectionState.Closed)
                     {
-                        _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, errorCode);
-                        _connectionState = ConnectionState.Closed;
+                        _frameWriter.WriteGoAwayAsync(HighestOpenedStreamId, errorCode);
+                        UpdateState(ConnectionState.Closed);
                     }
                 }
 
@@ -312,7 +304,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
         private async Task<bool> TryReadPrefaceAsync()
         {
-            while (_connectionState != ConnectionState.Closed)
+            while (State != ConnectionState.Closed)
             {
                 var result = await Input.ReadAsync();
                 var readableBuffer = result.Buffer;
@@ -507,7 +499,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 var endHeaders = (_incomingFrame.HeadersFlags & Http2HeadersFrameFlags.END_HEADERS) == Http2HeadersFrameFlags.END_HEADERS;
                 await DecodeTrailersAsync(endHeaders, _incomingFrame.HeadersPayload);
             }
-            else if (_incomingFrame.StreamId <= _highestOpenedStreamId)
+            else if (_incomingFrame.StreamId <= HighestOpenedStreamId)
             {
                 // http://httpwg.org/specs/rfc7540.html#rfc.section.5.1.1
                 //
@@ -796,12 +788,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
 
                 if (endHeaders)
                 {
-                    lock (_connectionStateLock)
+                    lock (StateLock)
                     {
-                        if (_connectionState != ConnectionState.Closed)
+                        if (State != ConnectionState.Closed)
                         {
                             StartStream(application);
-                            _highestOpenedStreamId = _currentHeadersStream.StreamId;
+                            HighestOpenedStreamId = _currentHeadersStream.StreamId;
                         }
                     }
 
@@ -810,11 +802,11 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             }
             catch (Http2StreamErrorException)
             {
-                lock (_connectionStateLock)
+                lock (StateLock)
                 {
-                    if (_connectionState != ConnectionState.Closed)
+                    if (State != ConnectionState.Closed)
                     {
-                        _highestOpenedStreamId = _currentHeadersStream.StreamId;
+                        HighestOpenedStreamId = _currentHeadersStream.StreamId;
                     }
                 }
 
@@ -880,7 +872,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             // If the stream ID in the incoming frame is higher than the highest opened stream ID so
             // far, then the incoming frame's target stream is in the idle state, which is the implicit
             // initial state for all streams.
-            if (_incomingFrame.StreamId > _highestOpenedStreamId)
+            if (_incomingFrame.StreamId > HighestOpenedStreamId)
             {
                 throw new Http2ConnectionErrorException(CoreStrings.FormatHttp2ErrorStreamIdle(_incomingFrame.Type, _incomingFrame.StreamId), Http2ErrorCode.PROTOCOL_ERROR);
             }
@@ -898,12 +890,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         {
             _streams.TryRemove(streamId, out _);
 
-            lock (_connectionStateLock)
+            lock (StateLock)
             {
-                if (_connectionState == ConnectionState.Closing && _streams.IsEmpty)
+                if (State == ConnectionState.Closing && _streams.IsEmpty)
                 {
-                    _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR);
-                    _connectionState = ConnectionState.Closed;
+                    _frameWriter.WriteGoAwayAsync(HighestOpenedStreamId, Http2ErrorCode.NO_ERROR);
+                    UpdateState(ConnectionState.Closed);
 
                     // Wake up request processing loop so the connection can complete if there are no pending requests
                     Input.CancelPendingRead();
@@ -1034,6 +1026,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         private static bool IsConnectionSpecificHeaderField(Span<byte> name, Span<byte> value)
         {
             return name.SequenceEqual(_connectionBytes) || (name.SequenceEqual(_teBytes) && !value.SequenceEqual(_trailersBytes));
+        }
+
+        private void UpdateState(ConnectionState state)
+        {
+            State = state;
+            StateTransitionEvents?[State]?.Set();
         }
 
         void ITimeoutControl.SetTimeout(long ticks, TimeoutAction timeoutAction)

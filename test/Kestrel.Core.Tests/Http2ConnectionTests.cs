@@ -308,7 +308,16 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
                 Application = _pair.Application,
                 Transport = _pair.Transport
             };
-            _connection = new Http2Connection(_connectionContext);
+
+            _connection = new Http2Connection(_connectionContext)
+            {
+                StateTransitionEvents = new Dictionary<Http2Connection.ConnectionState, ManualResetEventSlim>()
+            };
+
+            foreach (var state in Enum.GetValues(typeof(Http2Connection.ConnectionState)).Cast<Http2Connection.ConnectionState>())
+            {
+                _connection.StateTransitionEvents[state] = new ManualResetEventSlim();
+            }
         }
 
         public void Dispose()
@@ -2061,12 +2070,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
             await SendGoAwayAsync();
 
-            var spinLimit = 50; // 2.5 seconds
-            while (_connection.State == Http2Connection.ConnectionState.Open && spinLimit --> 0)
-            {
-                await Task.Delay(50);
-            }
-            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closing].Wait(5000));
 
             await SendRstStreamAsync(1);
             await SendRstStreamAsync(3);
@@ -2087,15 +2091,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
             _connection.OnInputOrOutputCompleted();
 
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
 
             await SendGoAwayAsync();
 
-            // Ping to ensure connection had time to process the GOAWAY
-            await SendPingAsync(Http2PingFrameFlags.NONE);
-            await ReceiveFrameAsync();
-
             Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.False(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closing].Wait(5000));
         }
 
         [Fact]
@@ -2105,15 +2106,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
             _connection.StopProcessingNextRequest();
 
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
 
             await SendGoAwayAsync();
 
-            // Ping to ensure connection had time to process the GOAWAY
-            await SendPingAsync(Http2PingFrameFlags.NONE);
-            await ReceiveFrameAsync();
-
             Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.False(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closing].Wait(5000));
         }
 
         [Fact]
@@ -2947,7 +2945,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             await InitializeConnectionAsync(_noopApplication);
 
             _connection.OnInputOrOutputCompleted();
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
 
             var frame = await ReceiveFrameAsync();
             VerifyGoAway(frame, 0, Http2ErrorCode.NO_ERROR);
@@ -2959,7 +2957,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             await InitializeConnectionAsync(_noopApplication);
 
             _connection.Abort(new ConnectionAbortedException());
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
 
             var frame = await ReceiveFrameAsync();
             VerifyGoAway(frame, 0, Http2ErrorCode.INTERNAL_ERROR);
@@ -2972,7 +2970,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
             // Completes ProcessRequestsAsync
             _pair.Application.Output.Complete();
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
 
             var frame = await ReceiveFrameAsync();
             VerifyGoAway(frame, 0, Http2ErrorCode.NO_ERROR);
@@ -2989,7 +2987,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             Assert.Equal(1, _connection.HighestOpenedStreamId);
 
             _connection.StopProcessingNextRequest();
-            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closing].Wait(5000));
 
             var frame = await ReceiveFrameAsync();
             while (frame.Type != Http2FrameType.GOAWAY)
@@ -2999,7 +2997,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             VerifyGoAway(frame, Int32.MaxValue, Http2ErrorCode.NO_ERROR);
 
             _connection.OnInputOrOutputCompleted();
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
 
             frame = await ReceiveFrameAsync();
             while (frame.Type != Http2FrameType.GOAWAY)
@@ -3023,7 +3021,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             Assert.Equal(1, _connection.HighestOpenedStreamId);
 
             _connection.StopProcessingNextRequest();
-            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closing].Wait(5000));
 
             var frame = await ReceiveFrameAsync();
             while (frame.Type != Http2FrameType.GOAWAY)
@@ -3039,7 +3037,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             {
                 frame = await ReceiveFrameAsync();
             }
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
             VerifyGoAway(frame, 1, Http2ErrorCode.NO_ERROR);
 
             await WaitForAllStreamsAsync();
@@ -3057,16 +3055,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
 
             await SendGoAwayAsync();
 
-            var spinLimit = 50; // 2.5 seconds
-            while (_connection.State == Http2Connection.ConnectionState.Open && spinLimit-- > 0)
-            {
-                await Task.Delay(50);
-            }
-            Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closing].Wait(5000));
 
             await StartStreamAsync(3, _browserRequestHeaders, endStream: true);
 
             Assert.Equal(Http2Connection.ConnectionState.Closing, _connection.State);
+            Assert.False(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
             Assert.Equal(3, _connection.HighestOpenedStreamId);
 
             await SendRstStreamAsync(1);
@@ -3087,7 +3081,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Tests
             Assert.Equal(1, _connection.HighestOpenedStreamId);
 
             _connection.OnInputOrOutputCompleted();
-            Assert.Equal(Http2Connection.ConnectionState.Closed, _connection.State);
+            Assert.True(_connection.StateTransitionEvents[Http2Connection.ConnectionState.Closed].Wait(5000));
 
             await StartStreamAsync(3, _browserRequestHeaders, endStream: true, trackAsRunningStream: false);
 
