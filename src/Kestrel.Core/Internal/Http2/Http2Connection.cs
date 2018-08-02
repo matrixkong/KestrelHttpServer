@@ -155,12 +155,20 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
             {
                 if (_connectionState == ConnectionState.Open)
                 {
-                    if (sendGoAway)
+                    if (_streams.IsEmpty)
                     {
-                        _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR);
+                        _frameWriter.WriteGoAwayAsync(_highestOpenedStreamId, Http2ErrorCode.NO_ERROR);
+                        _connectionState = ConnectionState.Closed;
                     }
+                    else
+                    {
+                        if (sendGoAway)
+                        {
+                            _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR);
+                        }
 
-                    _connectionState = ConnectionState.Closing;
+                        _connectionState = ConnectionState.Closing;
+                    }
                 }
             }
 
