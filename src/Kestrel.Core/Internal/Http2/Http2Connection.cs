@@ -141,7 +141,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
         public void StopProcessingNextRequest()
             => StopProcessingNextRequest(true);
 
-        public void StopProcessingNextRequest(bool sendGoAway = false)
+        public void StopProcessingNextRequest(bool sendGracefulGoAway = false)
         {
             lock (StateLock)
             {
@@ -154,7 +154,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                     }
                     else
                     {
-                        if (sendGoAway)
+                        if (sendGracefulGoAway)
                         {
                             _frameWriter.WriteGoAwayAsync(Int32.MaxValue, Http2ErrorCode.NO_ERROR);
                         }
@@ -683,7 +683,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2
                 throw new Http2ConnectionErrorException(CoreStrings.FormatHttp2ErrorStreamIdNotZero(_incomingFrame.Type), Http2ErrorCode.PROTOCOL_ERROR);
             }
 
-            StopProcessingNextRequest(sendGoAway: false);
+            StopProcessingNextRequest(sendGracefulGoAway: false);
 
             return Task.CompletedTask;
         }
