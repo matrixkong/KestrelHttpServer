@@ -3,15 +3,20 @@
 
 #if NETCOREAPP2_2
 
+using System.Collections.Generic;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http;
+using System.Net.Security;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http2;
 using Microsoft.AspNetCore.Testing;
 using Microsoft.AspNetCore.Testing.xunit;
 using Microsoft.Extensions.Logging.Testing;
@@ -27,6 +32,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests.Http2
         private static X509Certificate2 _x509Certificate2 = TestResources.GetTestCertificate();
 
         private HttpClient Client { get; set; }
+        private List<Http2Frame> ReceivedFrames { get; } = new List<Http2Frame>();
 
         public ShutdownTests()
         {
@@ -60,6 +66,17 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests.Http2
                 });
             }))
             {
+                // Setup a listening stream
+                var connection = server.CreateConnection();
+                var sslStream = new SslStream(connection.Stream);
+                await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions()
+                {
+                    TargetHost = "localhost",
+                    RemoteCertificateValidationCallback = (_, __, ___, ____) => true,
+                    ApplicationProtocols = new List<SslApplicationProtocol>() { SslApplicationProtocol.Http2, SslApplicationProtocol.Http11 },
+                    EnabledSslProtocols = SslProtocols.Tls12,
+                }, CancellationToken.None);
+                var reader = PipeReaderFactory.CreateFromStream(PipeOptions.Default, sslStream, CancellationToken.None);
 
                 var requestTask = Client.GetStringAsync($"https://localhost:{server.Port}/");
                 Assert.False(requestTask.IsCompleted);
@@ -73,6 +90,16 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests.Http2
 
                 Assert.Equal("hello world HTTP/2", await requestTask);
                 Assert.Equal(stopTask, await Task.WhenAny(stopTask, Task.Delay(10000)));
+
+                await ReceiveFramesAsync(reader);
+
+                var frame = Assert.Single(ReceivedFrames);
+                Assert.Equal(Http2FrameType.GOAWAY, frame.Type);
+                Assert.Equal(8, frame.Length);
+                Assert.Equal(0, frame.Flags);
+                Assert.Equal(0, frame.StreamId);
+                Assert.Equal(0, frame.GoAwayLastStreamId);
+                Assert.Equal(Http2ErrorCode.NO_ERROR, frame.GoAwayErrorCode);
             }
         }
 
@@ -98,16 +125,68 @@ namespace Microsoft.AspNetCore.Server.Kestrel.FunctionalTests.Http2
             },
             _ => { }))
             {
+                // Setup a listening stream
+                var connection = server.CreateConnection();
+                var sslStream = new SslStream(connection.Stream);
+                await sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions()
+                {
+                    TargetHost = "localhost",
+                    RemoteCertificateValidationCallback = (_, __, ___, ____) => true,
+                    ApplicationProtocols = new List<SslApplicationProtocol>() { SslApplicationProtocol.Http2, SslApplicationProtocol.Http11 },
+                    EnabledSslProtocols = SslProtocols.Tls12, // Intentionally less than the required 1.2
+                }, CancellationToken.None);
+                var reader = PipeReaderFactory.CreateFromStream(PipeOptions.Default, sslStream, CancellationToken.None);
+
                 var requestTask = Client.GetStringAsync($"https://localhost:{server.Port}/");
                 Assert.False(requestTask.IsCompleted);
                 Assert.True(requestStarted.Wait(5000), "timeout");
 
                 var stopTask = server.StopAsync();
 
-                // Keep the request unblocked
-                Assert.False(requestUnblocked.Wait(8000), "request unblocked");
+                // Keep the request blocked
+                Assert.False(requestUnblocked.Wait(6000), "request unblocked");
                 Assert.False(requestTask.IsCompletedSuccessfully, "request completed successfully");
                 Assert.Equal(stopTask, await Task.WhenAny(stopTask, Task.Delay(10000)));
+
+                await ReceiveFramesAsync(reader);
+
+                var frame = Assert.Single(ReceivedFrames);
+                Assert.Equal(Http2FrameType.GOAWAY, frame.Type);
+                Assert.Equal(8, frame.Length);
+                Assert.Equal(0, frame.Flags);
+                Assert.Equal(0, frame.StreamId);
+                Assert.Equal(0, frame.GoAwayLastStreamId);
+                Assert.Equal(Http2ErrorCode.NO_ERROR, frame.GoAwayErrorCode);
+            }
+        }
+
+        private async Task ReceiveFramesAsync(PipeReader reader)
+        {
+            var frame = new Http2Frame();
+
+            while (true)
+            {
+                var result = await reader.ReadAsync();
+                var buffer = result.Buffer;
+                var consumed = buffer.Start;
+                var examined = buffer.End;
+
+                try
+                {
+                    if (Http2FrameReader.ReadFrame(buffer, frame, 16_384, out consumed, out examined))
+                    {
+                        ReceivedFrames.Add(frame);
+                    }
+
+                    if (result.IsCompleted)
+                    {
+                        return;
+                    }
+                }
+                finally
+                {
+                    reader.AdvanceTo(consumed, examined);
+                }
             }
         }
     }
